@@ -1,0 +1,174 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Tensegrity Replay Harvester (prototype)</title>
+<style>
+body{font-family:Arial;margin:18px;color:#222}
+textarea{width:100%;height:120px;font-family:monospace}
+button{margin:6px 0;padding:8px}
+label{font-weight:600}
+.output{white-space:pre-wrap;background:#f6f6f6;padding:10px;border:1px solid #ddd}
+.row{display:flex;gap:8px}
+.col{flex:1}
+</style>
+</head>
+<body>
+<h2>Tensegrity Replay Harvester — prototype</h2>
+<p>Paste a small CSV or JSON snippet that contains module, time (s or ms), and pose/orientation. Two example buttons provide tiny synthetic inputs.</p>
+<label>Input data</label>
+<textarea id="input"></textarea>
+<div class="row">
+  <div class="col"><button id="exampleCsv">Load example CSV</button></div>
+  <div class="col"><button id="exampleJson">Load example JSON</button></div>
+</div>
+<div>
+  <button id="parse">Parse & Normalize</button>
+  <button id="exportCsv">Export Replay CSV</button>
+  <button id="exportJson">Export Replay JSON</button>
+</div>
+<h3>Parsed / Normalized</h3>
+<div id="parsed" class="output">(no data yet)</div>
+<h3>Replay Preview (compact JSON)</h3>
+<div id="preview" class="output">(no preview)</div>
+<script>
+// Small parser and normalizer prototype
+function parseCSV(text){
+  const lines = text.trim().split(/\r?\n/).map(l=>l.trim()).filter(Boolean);
+  const hdr = lines.shift().split(/,|;|\t/).map(h=>h.trim().toLowerCase());
+  const rows = lines.map(l=>{
+    const cols = l.split(/,|;|\t/).map(c=>c.trim());
+    const obj={};
+    hdr.forEach((h,i)=>obj[h]=cols[i]);
+    return obj;
+  });
+  return rows;
+}
+
+function tryParseNumber(s){
+  if (s==null) return null;
+  const n = Number(s);
+  return isNaN(n)?null:n;
+}
+
+function normalizeRecords(records){
+  // Expect fields: module, time (s or ms), x,y,z, qx,qy,qz,qw or yaw,pitch,roll
+  const out = [];
+  records.forEach(r=>{
+    const mod = r.module || r.id || r.name;
+    let t = tryParseNumber(r.t || r.time || r.timestamp || r.ts);
+    // If time is large, guess milliseconds; convert to seconds
+    if (t!=null && t>1e5) t = t/1000;
+    const x = tryParseNumber(r.x || r.posx || r.px);
+    const y = tryParseNumber(r.y || r.posy || r.py);
+    const z = tryParseNumber(r.z || r.posz || r.pz);
+    const qx = tryParseNumber(r.qx);
+    const qy = tryParseNumber(r.qy);
+    const qz = tryParseNumber(r.qz);
+    const qw = tryParseNumber(r.qw);
+    // fallback to yaw/pitch/roll as degrees
+    const yaw = tryParseNumber(r.yaw);
+    const pitch = tryParseNumber(r.pitch);
+    const roll = tryParseNumber(r.roll);
+    out.push({module:mod||"unknown", time: t, pos: [x,y,z], quat: qx!=null?[qx,qy,qz,qw]:(yaw!=null?[yaw,pitch,roll,null]:null), raw:r});
+  });
+  // index by module and sort by time
+  const grouped = {};
+  out.forEach(o=>{
+    const m = String(o.module);
+    if (!grouped[m]) grouped[m]=[];
+    grouped[m].push(o);
+  });
+  Object.keys(grouped).forEach(m=>grouped[m].sort((a,b)=> (a.time||0)-(b.time||0)));
+  return grouped;
+}
+
+function exportReplayCSV(grouped){
+  // columns: module,time(s),px,py,pz,qx,qy,qz,qw
+  const rows=['module,time,px,py,pz,qx,qy,qz,qw'];
+  Object.keys(grouped).forEach(m=>{
+    grouped[m].forEach(r=>{
+      const t = r.time!=null?r.time:'';
+      const p = r.pos.map(v=>v==null?'':v).join(',');
+      const q = (r.quat||[]).map(v=>v==null?'':v).join(',');
+      rows.push([m,t].join(',')+','+p+','+q);
+    });
+  });
+  return rows.join('\n');
+}
+
+function exportReplayJSON(grouped){
+  // Structure: modules: {id: [{t:..., pos:[...], quat:[...]}]}
+  const out={modules:{}};
+  Object.keys(grouped).forEach(m=>{
+    out.modules[m]=grouped[m].map(r=>({t:r.time, pos:r.pos, quat:r.quat}));
+  });
+  return JSON.stringify(out,null,2);
+}
+
+function makePreview(grouped){
+  // tiny preview: first and last timestamps per module and sample counts
+  const p = {};
+  Object.keys(grouped).forEach(m=>{
+    const arr = grouped[m];
+    const times = arr.map(a=>a.time).filter(t=>t!=null);
+    const first = times.length?times[0]:null;
+    const last = times.length?times[times.length-1]:null;
+    p[m]={samples:arr.length, t0:first, tN:last};
+  });
+  return JSON.stringify(p,null,2);
+}
+
+// UI
+const inputEl = document.getElementById('input');
+const parsedEl = document.getElementById('parsed');
+const previewEl = document.getElementById('preview');
+let currentGrouped = null;
+
+document.getElementById('exampleCsv').onclick = ()=>{
+  inputEl.value = 'module,time,x,y,z,qx,qy,qz,qw\nA,0,0,0,0,0,0,0,1\nA,100,0.1,0,0,0,0,0,1\nB,0,1,0,0,0,0,0,1\nB,100,1.1,0,0,0,0,0,1';
+};
+
+document.getElementById('exampleJson').onclick = ()=>{
+  inputEl.value = JSON.stringify({records:[{module:'A',ts:0,px:0,py:0,pz:0,yaw:0,pitch:0,roll:0},{module:'A',ts:100,px:0.1,py:0,pz:0,yaw:1,pitch:0,roll:0},{module:'B',ts:0,px:1,py:0,pz:0},{module:'B',ts:100,px:1.1}]},null,2);
+};
+
+document.getElementById('parse').onclick = ()=>{
+  const text = inputEl.value.trim();
+  if (!text){ parsedEl.textContent='(no input)'; return; }
+  let records = [];
+  try{
+    if (text[0]=='{'||text[0]=='['){
+      const j = JSON.parse(text);
+      if (Array.isArray(j)) records = j;
+      else if (j.records) records = j.records;
+      else if (j.data) records = j.data;
+      else records = [j];
+    } else {
+      records = parseCSV(text);
+    }
+  }catch(e){ parsedEl.textContent = 'Parse error: '+e.message; return; }
+  currentGrouped = normalizeRecords(records);
+  parsedEl.textContent = JSON.stringify(currentGrouped,null,2);
+  previewEl.textContent = makePreview(currentGrouped);
+};
+
+document.getElementById('exportCsv').onclick = ()=>{
+  if (!currentGrouped){ alert('Parse first'); return; }
+  const txt = exportReplayCSV(currentGrouped);
+  // trigger download
+  const blob = new Blob([txt],{type:'text/csv'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a'); a.href=url; a.download='replay.csv'; a.click(); URL.revokeObjectURL(url);
+};
+
+document.getElementById('exportJson').onclick = ()=>{
+  if (!currentGrouped){ alert('Parse first'); return; }
+  const txt = exportReplayJSON(currentGrouped);
+  const blob = new Blob([txt],{type:'application/json'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a'); a.href=url; a.download='replay.json'; a.click(); URL.revokeObjectURL(url);
+};
+</script>
+</body>
+</html>
